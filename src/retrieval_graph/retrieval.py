@@ -31,6 +31,9 @@ def make_text_encoder(model: str) -> Embeddings:
             from langchain_cohere import CohereEmbeddings
 
             return CohereEmbeddings(model=model)  # type: ignore
+        case "aws":
+            from langchain_aws import BedrockEmbeddings
+            return BedrockEmbeddings(model_id=model,region_name=os.getenv("AWS_REGION"))  # type: ignore
         case _:
             raise ValueError(f"Unsupported embedding provider: {provider}")
 
@@ -83,7 +86,33 @@ def make_pinecone_retriever(
     vstore = PineconeVectorStore.from_existing_index(
         os.environ["PINECONE_INDEX_NAME"], embedding=embedding_model
     )
-    yield vstore.as_retriever(search_kwargs=search_kwargs)
+    yield vstore.as_retriever(search_type="mmr",
+    search_kwargs={"k": 1, "lambda_mult": 0.7})
+
+@contextmanager
+def make_postgres_retriever(
+    configuration: IndexConfiguration, embedding_model: Embeddings
+) -> Generator[VectorStoreRetriever, None, None]:
+    """Configure this agent to connect to a specific Postgres index."""
+    from langchain_postgres.vectorstores import PGVector
+    postgres_url = os.getenv("POSTGRES_CHAIN")
+    collection_name = os.getenv("POSTGRES_COLLECTION_NAME")
+    print(postgres_url,collection_name)
+    vstore = PGVector(
+        connection = postgres_url,
+        collection_name=collection_name,
+        embeddings=embedding_model,
+        async_mode=True,
+        use_jsonb=True
+    )
+    search_kwargs = configuration.search_kwargs
+    pre_filter = search_kwargs.setdefault("pre_filter", {})
+    pre_filter["user_id"] = {"$eq": configuration.user_id}
+    retriever = vstore.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": 1, "lambda_mult": 0.7}
+    )
+    yield retriever
 
 
 @contextmanager
@@ -118,15 +147,15 @@ def make_retriever(
         case "elastic" | "elastic-local":
             with make_elastic_retriever(configuration, embedding_model) as retriever:
                 yield retriever
-
         case "pinecone":
             with make_pinecone_retriever(configuration, embedding_model) as retriever:
                 yield retriever
-
         case "mongodb":
             with make_mongodb_retriever(configuration, embedding_model) as retriever:
                 yield retriever
-
+        case "postgres":
+            with make_postgres_retriever(configuration, embedding_model) as retriever:
+                yield retriever
         case _:
             raise ValueError(
                 "Unrecognized retriever_provider in configuration. "
